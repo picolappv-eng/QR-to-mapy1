@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ca">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hike & Fly to Mapy.cz</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; text-align: center; background-color: #f4f4f9; }
+        .container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #e63946; }
+        input[type="file"] { margin: 20px 0; padding: 10px; border: 2px dashed #ccc; width: 90%; }
+        button { background-color: #2a9d8f; color: white; border: none; padding: 15px 30px; font-size: 16px; border-radius: 5px; cursor: pointer; margin-top: 10px;}
+        button:disabled { background-color: #ccc; }
+        #status { margin-top: 20px; color: #333; font-weight: bold; white-space: pre-wrap; text-align: left;}
+        .error { color: red; }
+        .success { color: green; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🏔 Hike & Fly QR Parser</h1>
+    <p>Puja la foto del QR de la tasca. Es generarà un fitxer per obrir a Mapy.cz amb els radis dibuixats.</p>
+    
+    <input type="file" id="file-input" accept="image/*">
+    <br>
+    <canvas id="qr-canvas" hidden></canvas>
+    <div id="status">Esperant imatge...</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+
+<script>
+    const fileInput = document.getElementById('file-input');
+    const statusDiv = document.getElementById('status');
+    const canvas = document.getElementById('qr-canvas');
+    const ctx = canvas.getContext('2d');
+
+    fileInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        statusDiv.innerText = "Processant imatge...";
+        statusDiv.className = "";
+
+        const img = new Image();
+        img.onload = () => {
+            canvas.width = img.width;
+            canvas.height = img.height;
+            ctx.drawImage(img, 0, 0);
+            
+            // Llegir dades de la imatge
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const code = jsQR(imageData.data, imageData.width, imageData.height);
+
+            if (code) {
+                statusDiv.innerText = "QR Detectat: \n" + code.data;
+                processarDadesQR(code.data);
+            } else {
+                statusDiv.innerText = "❌ No s'ha trobat cap QR a la imatge. Prova amb una foto més clara.";
+                statusDiv.className = "error";
+            }
+        };
+        img.src = URL.createObjectURL(file);
+    });
+
+    // --- 1. LÒGICA DE PARSEJAR (Analitzar el text) ---
+    function processarDadesQR(text) {
+        const balises = [];
+        
+        // INTENT 1: Format estàndard (Codi Lat Lon Radi)
+        // Busca patrons tipus: B01 42.123 1.456 R400 (o amb comes)
+        const regexGeneral = /([A-Za-z0-9]+)[\s,]+(\d+\.\d+)[\s,]+(-?\d+\.\d+)[\s,]+.*?[Rr]?(\d{3,5})/g;
+        
+        let match;
+        while ((match = regexGeneral.exec(text)) !== null) {
+            balises.push({
+                nom: match[1],
+                lat: parseFloat(match[2]),
+                lon: parseFloat(match[3]),
+                radi: parseInt(match[4]) // El radi sol ser el 4t grup
+            });
+        }
+
+        // Si no troba res, potser el format és diferent. Aquí podriem afegir més lògica.
+
+        if (balises.length > 0) {
+            generarKML(balises);
+            statusDiv.innerText += "\n\n✅ Fitxer generat amb " + balises.length + " balises!";
+            statusDiv.className = "success";
+        } else {
+            statusDiv.innerText += "\n\n⚠ He llegit el QR però no entenc el format de les coordenades.";
+            statusDiv.className = "error";
+        }
+    }
+
+    // --- 2. LÒGICA MATEMÀTICA (Dibuixar cercles) ---
+    function getCoordinatesCircle(lat, lon, radiusMeters) {
+        let coords = "";
+        const R = 6378137; // Radi Terra
+        const steps = 36; // Punts per fer el cercle (cada 10 graus)
+
+        for (let i = 0; i <= steps; i++) {
+            const angle = (i * 360 / steps) * (Math.PI / 180);
+            const latRad = lat * (Math.PI / 180);
+            const lonRad = lon * (Math.PI / 180);
+
+            const d = radiusMeters;
+            
+            const newLat = Math.asin(Math.sin(latRad) * Math.cos(d / R) + 
+                           Math.cos(latRad) * Math.sin(d / R) * Math.cos(angle));
+            
+            const newLon = lonRad + Math.atan2(Math.sin(angle) * Math.sin(d / R) * Math.cos(latRad), 
+                           Math.cos(d / R) - Math.sin(latRad) * Math.sin(newLat));
+
+            const pLat = newLat * (180 / Math.PI);
+            const pLon = newLon * (180 / Math.PI);
+
+            coords += `${pLon},${pLat},0 `;
+        }
+        return coords;
+    }
+
+    // --- 3. GENERAR FITXER KML ---
+    function generarKML(balises) {
+        let kml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Tasca H&F</name>`;
+
+        balises.forEach(b => {
+            // A. El Punt Central (Icona)
+            kml += `
+    <Placemark>
+      <name>${b.nom}</name>
+      <Point>
+        <coordinates>${b.lon},${b.lat},0</coordinates>
+      </Point>
+    </Placemark>`;
+
+            // B. El Cercle (Radi)
+            if (b.radi > 0) {
+                kml += `
+    <Placemark>
+      <name>Radi ${b.radi}m - ${b.nom}</name>
+      <Style>
+        <LineStyle>
+          <color>ff0000ff</color>
+          <width>3</width>
+        </LineStyle>
+        <PolyStyle>
+          <fill>0</fill>
+        </PolyStyle>
+      </Style>
+      <LineString>
+        <coordinates>${getCoordinatesCircle(b.lat, b.lon, b.radi)}</coordinates>
+      </LineString>
+    </Placemark>`;
+            }
+        });
+
+        kml += `
+  </Document>
+</kml>`;
+
+        // Descarregar automàticament
+        const blob = new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = 'Tasca_HikeFly.kml';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
+</script>
+
+</body>
+</html>
