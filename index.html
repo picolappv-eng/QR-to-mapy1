@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hike & Fly to Mapy.cz</title>
+    <title>Hike & Fly to Mapy.cz (XCTrack Ready)</title>
     <style>
         body { font-family: sans-serif; padding: 20px; text-align: center; background-color: #f4f4f9; }
         .container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
@@ -20,7 +20,7 @@
 
 <div class="container">
     <h1>🏔 Hike & Fly QR Parser</h1>
-    <p>Puja la foto del QR de la tasca. Es generarà un fitxer per obrir a Mapy.cz amb els radis dibuixats.</p>
+    <p>Puja la foto del QR de la tasca. Format *XCTSK* detectat!</p>
     
     <input type="file" id="file-input" accept="image/*">
     <br>
@@ -49,56 +49,110 @@
             canvas.height = img.height;
             ctx.drawImage(img, 0, 0);
             
-            // Llegir dades de la imatge
             const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
             const code = jsQR(imageData.data, imageData.width, imageData.height);
 
             if (code) {
-                statusDiv.innerText = "QR Detectat: \n" + code.data;
+                statusDiv.innerText = "QR Detectat: \n" + code.data.substring(0, 200) + '...';
                 processarDadesQR(code.data);
             } else {
-                statusDiv.innerText = "❌ No s'ha trobat cap QR a la imatge. Prova amb una foto més clara.";
+                statusDiv.innerText = "❌ No s'ha trobat cap QR a la imatge.";
                 statusDiv.className = "error";
             }
         };
         img.src = URL.createObjectURL(file);
     });
 
-    // --- 1. LÒGICA DE PARSEJAR (Analitzar el text) ---
-    function processarDadesQR(text) {
-        const balises = [];
+    // --- 1. FUNCIÓ PER DESXIFRAR COORDENADES XCTSK (IMPORTANT) ---
+    // Aquesta funció converteix la cadena Base91 d'XCTrack (el camp 'z') en Lat/Lon.
+    function decodeXCTrackCoord(encoded) {
+        // La codificació OpenAir/Base91 utilitza la lletra 'C' (67) i 'A' (65) com a valors base.
+        const base = 'A'.charCodeAt(0);
+        const latBase = 'C'.charCodeAt(0);
         
-        // INTENT 1: Format estàndard (Codi Lat Lon Radi)
-        // Busca patrons tipus: B01 42.123 1.456 R400 (o amb comes)
-        const regexGeneral = /([A-Za-z0-9]+)[\s,]+(\d+\.\d+)[\s,]+(-?\d+\.\d+)[\s,]+.*?[Rr]?(\d{3,5})/g;
+        let multiplier = 1e5;
+        let lat = 0;
+        let lon = 0;
+        let p = 0;
         
-        let match;
-        while ((match = regexGeneral.exec(text)) !== null) {
-            balises.push({
-                nom: match[1],
-                lat: parseFloat(match[2]),
-                lon: parseFloat(match[3]),
-                radi: parseInt(match[4]) // El radi sol ser el 4t grup
-            });
+        // El format XCTrack utilitza sis caràcters per a Lat i sis per a Lon.
+        for (let i = 0; i < 6; i++) {
+            lat += (encoded.charCodeAt(p++) - latBase) * multiplier;
+            multiplier /= 10;
         }
 
-        // Si no troba res, potser el format és diferent. Aquí podriem afegir més lògica.
+        multiplier = 1e5;
+        for (let i = 0; i < 6; i++) {
+            lon += (encoded.charCodeAt(p++) - base) * multiplier;
+            multiplier /= 10;
+        }
+
+        // Ajustar la precisió i el signe
+        lat = (lat / 10000) - 90;
+        lon = (lon / 10000) - 180;
+        
+        return { lat: lat, lon: lon };
+    }
+
+
+    // --- 2. LÒGICA DE PARSEJAR (Analitzar el text XCTSK) ---
+    function processarDadesQR(text) {
+        if (!text.startsWith("XCTSK:")) {
+            statusDiv.innerText += "\n\n⚠ Format no reconegut com XCTSK.";
+            statusDiv.className = "error";
+            return;
+        }
+
+        const jsonString = text.substring(6); // Elimina "XCTSK:"
+        let data;
+        try {
+            data = JSON.parse(jsonString);
+        } catch (e) {
+            statusDiv.innerText += "\n\n❌ Error en parsejar el JSON de la tasca.";
+            statusDiv.className = "error";
+            return;
+        }
+
+        const balises = [];
+        
+        // Iterem sobre la llista de punts ('t')
+        data.t.forEach((tp, index) => {
+            const coords = decodeXCTrackCoord(tp.z);
+            
+            // XCTrack utilitza 'r' (radius) o assigna 400m per defecte si no s'especifica.
+            // La majoria dels apps usen 400m per defecte si no hi ha valor.
+            // Si el teu organitzador posa el radi en un altre camp, ajustarem això.
+            // Per defecte, farem servir 400m.
+            const radiMetres = tp.r ? tp.r : 400; 
+
+            // Determinar si és Start (t=1) o Finish (t=3) o Turnpoint (t=2, o per defecte)
+            let tipus = "WPT";
+            if (tp.t === 1) tipus = "START"; 
+            if (tp.t === 3) tipus = "FINISH"; 
+
+            balises.push({
+                nom: ${tipus} ${index + 1} (${tp.n || 'TP'}), // Utilitza el nom del camp 'n' o un genèric
+                lat: coords.lat,
+                lon: coords.lon,
+                radi: radiMetres
+            });
+        });
 
         if (balises.length > 0) {
             generarKML(balises);
-            statusDiv.innerText += "\n\n✅ Fitxer generat amb " + balises.length + " balises!";
+            statusDiv.innerText += "\n\n✅ Fitxer KML generat correctament amb " + balises.length + " balises!";
             statusDiv.className = "success";
         } else {
-            statusDiv.innerText += "\n\n⚠ He llegit el QR però no entenc el format de les coordenades.";
+            statusDiv.innerText += "\n\n⚠ No s'han trobat balises a la tasca.";
             statusDiv.className = "error";
         }
     }
-
-    // --- 2. LÒGICA MATEMÀTICA (Dibuixar cercles) ---
+    
+    // --- 3. LÒGICA MATEMÀTICA (Dibuixar cercles) ---
     function getCoordinatesCircle(lat, lon, radiusMeters) {
         let coords = "";
         const R = 6378137; // Radi Terra
-        const steps = 36; // Punts per fer el cercle (cada 10 graus)
+        const steps = 36; 
 
         for (let i = 0; i <= steps; i++) {
             const angle = (i * 360 / steps) * (Math.PI / 180);
@@ -121,42 +175,37 @@
         return coords;
     }
 
-    // --- 3. GENERAR FITXER KML ---
+    // --- 4. GENERAR FITXER KML ---
     function generarKML(balises) {
         let kml = `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
-    <name>Tasca H&F</name>`;
+    <name>Tasca H&F XCTSK</name>
+    <Style id="startStyle"><LineStyle><color>ff00ff00</color><width>3</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+    <Style id="finishStyle"><LineStyle><color>ff1478ff</color><width>3</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+    <Style id="turnpointStyle"><LineStyle><color>ff0000ff</color><width>3</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>`;
 
         balises.forEach(b => {
-            // A. El Punt Central (Icona)
+            // A. Dibuixar el Cercle (Radi)
+            let styleId = "turnpointStyle";
+            if (b.nom.includes("START")) styleId = "startStyle";
+            if (b.nom.includes("FINISH")) styleId = "finishStyle";
+            
             kml += `
     <Placemark>
-      <name>${b.nom}</name>
-      <Point>
-        <coordinates>${b.lon},${b.lat},0</coordinates>
-      </Point>
-    </Placemark>`;
-
-            // B. El Cercle (Radi)
-            if (b.radi > 0) {
-                kml += `
-    <Placemark>
-      <name>Radi ${b.radi}m - ${b.nom}</name>
-      <Style>
-        <LineStyle>
-          <color>ff0000ff</color>
-          <width>3</width>
-        </LineStyle>
-        <PolyStyle>
-          <fill>0</fill>
-        </PolyStyle>
-      </Style>
+      <name>Cilindre ${b.nom} (${b.radi}m)</name>
+      <styleUrl>#${styleId}</styleUrl>
       <LineString>
         <coordinates>${getCoordinatesCircle(b.lat, b.lon, b.radi)}</coordinates>
       </LineString>
     </Placemark>`;
-            }
+            
+            // B. El Punt Central (Icona)
+            kml += `
+    <Placemark>
+      <name>${b.nom}</name>
+      <Point><coordinates>${b.lon},${b.lat},0</coordinates></Point>
+    </Placemark>`;
         });
 
         kml += `
@@ -167,7 +216,7 @@
         const blob = new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' });
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
-        link.download = 'Tasca_HikeFly.kml';
+        link.download = 'Tasca_HikeFly_XCTrack.kml';
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
